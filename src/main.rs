@@ -3,7 +3,7 @@ mod util;
 
 use std::{env, fs};
 
-use handler::extract_unique_delegates;
+use handler::{extract_unique_delegates, extract_user_task_attributes};
 use util::get_latest_bpmn_file;
 
 fn main() {
@@ -14,6 +14,8 @@ fn main() {
 
     let orig_xml = fs::read_to_string(file_path).expect("Failed to read file");
     let xml_to_list = orig_xml.lines();
-    let uniq_delegates = extract_unique_delegates(xml_to_list);
+    let uniq_delegates = extract_unique_delegates(xml_to_list.clone());
+    let uniq_user_attributes = extract_user_task_attributes(xml_to_list.clone());
     println!("{:?}", uniq_delegates);
+    println!("{:?}", uniq_user_attributes)
 }
