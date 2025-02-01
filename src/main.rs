@@ -15,11 +15,10 @@ fn main() {
         .expect(format!("In the directory {} is missing .bpmn files", inp_dir).as_str());
 
     let orig_xml = fs::read_to_string(file_path).expect("Failed to read file");
-    let xml_to_list = orig_xml.lines();
 
-    let uniq_delegates = extract_unique_delegates(xml_to_list.clone());
-    let uniq_user_attributes = extract_user_task_attributes(xml_to_list.clone());
-    let uniq_combined_variables: Vec<String> = get_combined_variables(xml_to_list.clone());
+    let uniq_delegates = extract_unique_delegates(orig_xml.lines());
+    let uniq_user_attributes = extract_user_task_attributes(orig_xml.lines());
+    let uniq_combined_variables = get_combined_variables(&orig_xml);
 
     let _ = Excel::new()
         .write_to_excel_single(uniq_delegates, "Уникальные делегаты")

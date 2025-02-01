@@ -1,18 +1,19 @@
-use std::{fs, path::PathBuf, time::SystemTime};
+use std::{fs, path::PathBuf, time::UNIX_EPOCH};
 
 pub fn get_latest_bpmn_file(inp_dir: &str) -> Option<PathBuf> {
     fs::read_dir(inp_dir)
         .ok()?
-        .filter_map(|entry| entry.ok())
+        .flatten() // Вместо filter_map
         .filter(|entry| {
-            entry.path().is_file() && entry.path().extension().map_or(false, |ext| ext == "bpmn")
+            let path = entry.path();
+            path.is_file() && path.extension().map_or(false, |ext| ext == "bpmn")
         })
         .max_by_key(|entry| {
             entry
                 .metadata()
                 .ok()
                 .and_then(|meta| meta.modified().ok())
-                .unwrap_or_else(|| SystemTime::now())
+                .unwrap_or(UNIX_EPOCH)
         })
-        .map(|entry| entry.path().clone())
+        .map(|entry| entry.path())
 }

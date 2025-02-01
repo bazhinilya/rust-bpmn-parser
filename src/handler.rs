@@ -1,18 +1,24 @@
 use regex::Regex;
 use std::{collections::HashSet, env};
 
-pub fn extract_unique_delegates<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+pub fn extract_unique_delegates<'a, I: Iterator<Item = &'a str>>(lines: I) -> Vec<String> {
     let re = Regex::new(r#"class="([^"]*)"#).unwrap();
     lines
-        .filter(|line| line.contains(&env::var("DELEGATE_PATTERN").unwrap()))
+        .filter(|line| {
+            if let Ok(delegate_pattern) = env::var("DELEGATE_PATTERN") {
+                line.contains(&delegate_pattern)
+            } else {
+                false
+            }
+        })
         .filter_map(|line| re.captures(line).map(|cap| cap[1].to_owned()))
         .collect::<HashSet<_>>()
         .into_iter()
         .collect()
 }
 
-pub fn extract_user_task_attributes<'a>(
-    lines: impl Iterator<Item = &'a str>,
+pub fn extract_user_task_attributes<'a, I: Iterator<Item = &'a str>>(
+    lines: I,
 ) -> Vec<(String, String)> {
     let re = Regex::new(r#"<bpmn:userTask.*?id="([^"]+)"[^>]*name="([^"]*)"#).unwrap();
     let mut attrs = lines
@@ -23,98 +29,115 @@ pub fn extract_user_task_attributes<'a>(
     attrs
 }
 
-pub fn get_combined_variables<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let lines_vec: Vec<&str> = lines.collect();
-    let mut result: Vec<String> = extract_context_variables(lines_vec.iter().cloned())
-        .into_iter()
-        .chain(extract_input_variables(lines_vec.iter().cloned()))
-        .chain(extract_output_variables(lines_vec.iter().cloned()))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+pub fn get_combined_variables<'a>(orig_xml: &'a str) -> Vec<String> {
+    let lines: Vec<&str> = orig_xml.lines().collect();
+
+    let mut result = Vec::new();
+
+    result.extend(extract_context_variables(&lines));
+    result.extend(extract_input_variables(&lines));
+    result.extend(extract_output_variables(&lines));
+
     result.sort();
+    result.dedup();
     result
 }
 
-fn extract_input_variables<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+fn extract_input_variables<'a>(lines: &[&'a str]) -> Vec<String> {
     let re = Regex::new(r"<[^>]*>").unwrap();
     lines
-        .filter(|line| {
-            line.contains("<camunda:inputParameter name=\"outputName\">")
+        .iter()
+        .filter_map(|line| {
+            if line.contains("<camunda:inputParameter name=\"outputName\">")
                 && line.contains("</camunda:inputParameter>")
                 && !line.contains("${")
+            {
+                Some(re.replace_all(*line, "").trim().to_string())
+            } else {
+                None
+            }
         })
-        .map(|line| re.replace_all(line, "").trim().to_string())
-        .collect::<HashSet<_>>()
-        .into_iter()
         .collect()
 }
 
-fn extract_output_variables<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let name_re = Regex::new(r#"name="([^"]+)""#).unwrap();
+fn extract_output_variables<'a>(lines: &[&'a str]) -> Vec<String> {
+    let name_re = Regex::new(r#"name="([^"]+)"#).unwrap();
     let var_re = Regex::new(r"\$\{([a-zA-Z0-9_]+)\}").unwrap();
     lines
-        .filter(|line| {
-            line.contains("<camunda:outputParameter name=\"") && !line.contains("${true}")
+        .iter()
+        .filter_map(|line| {
+            if line.contains("<camunda:outputParameter name=\"") && !line.contains("${true}") {
+                var_re
+                    .captures(line)
+                    .and_then(|caps| caps.get(1))
+                    .or_else(|| name_re.captures(line).and_then(|caps| caps.get(1)))
+                    .map(|m| m.as_str().trim().to_string())
+            } else {
+                None
+            }
         })
-        .map(|line| {
-            var_re
-                .captures(line)
-                .and_then(|caps| caps.get(1))
-                .or_else(|| name_re.captures(line).and_then(|caps| caps.get(1)))
-                .map(|m| m.as_str().trim().to_string())
-                .unwrap_or_default()
-        })
-        .collect::<HashSet<_>>()
-        .into_iter()
         .collect()
 }
 
-fn extract_context_variables<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let variable_re = Regex::new(r#"(['"])(.*?)(['"])"#).unwrap();
-    let mut variables = HashSet::new();
+fn remove_tags(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for c in input.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+    result
+}
+
+fn extract_variables_from_line(line: &str, variable_re: &Regex) -> Vec<String> {
+    let mut variables = Vec::new();
+    if let Some(capture) = variable_re.captures(line) {
+        if let Some(var) = capture.get(1) {
+            variables.push(var.as_str().to_string());
+        }
+    }
+    variables
+}
+
+fn extract_context_variables(lines: &[&str]) -> Vec<String> {
+    let variable_re = Regex::new(r#"['"](.*?)['"]"#).unwrap();
+    let mut variables = Vec::new();
     let mut is_execution = false;
+    let execution_set_variable = "execution.setVariable(";
+    let execution_set_variables = "execution.setVariables(";
+    let execution_endings = [");", ")", "])", "]);"];
 
-    let splitted_xml: Vec<String> = lines
-        .map(|str| str.replace(char::is_whitespace, ""))
-        .map(|str| {
-            Regex::new(r"<.*?>")
-                .unwrap()
-                .replace_all(&str, "")
-                .to_string()
-        })
-        .filter(|str| !str.trim().is_empty())
-        .collect();
-
-    for str in splitted_xml {
-        if str.contains("execution.setVariable(") {
-            if let Some(caps) = variable_re.captures(&str) {
-                if let Some(var) = caps.get(2) {
-                    variables.insert(var.as_str().to_string());
-                }
-            }
+    for line in lines {
+        let cleaned_line = line.trim();
+        if cleaned_line.is_empty() {
+            continue;
         }
 
-        if is_execution || str.contains("execution.setVariables(") {
+        let clean_line = remove_tags(cleaned_line);
+
+        if clean_line.contains(execution_set_variable) {
+            variables.extend(extract_variables_from_line(&clean_line, &variable_re));
+        }
+
+        if !is_execution && clean_line.contains(execution_set_variables) {
             is_execution = true;
+            variables.extend(extract_variables_from_line(&clean_line, &variable_re));
+        }
 
-            if let Some(caps) = variable_re.captures(&str) {
-                if let Some(var) = caps.get(2) {
-                    variables.insert(var.as_str().to_string());
-                }
-            }
-
-            if str == ");"
-                || str == ")"
-                || str == "])"
-                || str == "]);"
-                || str.ends_with("])")
-                || str.ends_with("]);")
+        if is_execution {
+            if execution_endings
+                .iter()
+                .any(|&ending| clean_line.ends_with(ending))
             {
                 is_execution = false;
+            } else {
+                variables.extend(extract_variables_from_line(&clean_line, &variable_re));
             }
         }
     }
-
-    variables.into_iter().collect()
+    variables
 }
