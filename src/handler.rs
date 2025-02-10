@@ -1,143 +1,157 @@
-use regex::Regex;
-use std::{collections::HashSet, env};
+use std::{
+    collections::HashSet,
+    error::Error,
+    fs::File,
+    io::{BufRead, BufReader},
+    path::PathBuf,
+};
 
-pub fn extract_unique_delegates<'a, I: Iterator<Item = &'a str>>(lines: I) -> Vec<String> {
-    let re = Regex::new(r#"class="([^"]*)"#).unwrap();
-    lines
-        .filter(|line| {
-            if let Ok(delegate_pattern) = env::var("DELEGATE_PATTERN") {
-                line.contains(&delegate_pattern)
-            } else {
-                false
-            }
-        })
-        .filter_map(|line| re.captures(line).map(|cap| cap[1].to_owned()))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
-}
+const DELEGATE_PREF: &str = "class=\"";
+const USER_TASK_PAT: &str = "<bpmn:userTask id=\"";
+const INPUT_START_PAT: &str = "<camunda:inputParameter name=\"outputName\">";
+const INPUT_END_PAT: &str = "</camunda:inputParameter>";
+const INPUT_EXC_PAT: &str = "${";
+const OUTPUT_PAT: &str = "<camunda:outputParameter name=\"";
+const OUTPUT_EX_PAT: &str = "${true}";
+const SET_VAR_PAT: &str = "execution.setVariable(";
+const SET_VARS_PAT: &str = "execution.setVariables(";
 
-pub fn extract_user_task_attributes<'a, I: Iterator<Item = &'a str>>(
-    lines: I,
-) -> Vec<(String, String)> {
-    let re = Regex::new(r#"<bpmn:userTask.*?id="([^"]+)"[^>]*name="([^"]*)"#).unwrap();
-    let mut attrs = lines
-        .flat_map(|line| re.captures_iter(line))
-        .map(|cap| (cap[1].to_string(), cap[2].to_string()))
-        .collect::<Vec<_>>();
-    attrs.sort_by(|a, b| a.1.cmp(&b.1));
-    attrs
-}
+const NAME_PREF: &str = "name=\"";
+const END_QUOTE: &str = "\"";
 
-pub fn get_combined_variables<'a>(orig_xml: &'a str) -> Vec<String> {
-    let lines: Vec<&str> = orig_xml.lines().collect();
+const END_BPMN: &str = "<bpmndi:BPMNDiagram";
 
-    let mut result = Vec::new();
-
-    result.extend(extract_context_variables(&lines));
-    result.extend(extract_input_variables(&lines));
-    result.extend(extract_output_variables(&lines));
-
-    result.sort();
-    result.dedup();
-    result
-}
-
-fn extract_input_variables<'a>(lines: &[&'a str]) -> Vec<String> {
-    let re = Regex::new(r"<[^>]*>").unwrap();
-    lines
-        .iter()
-        .filter_map(|line| {
-            if line.contains("<camunda:inputParameter name=\"outputName\">")
-                && line.contains("</camunda:inputParameter>")
-                && !line.contains("${")
-            {
-                Some(re.replace_all(*line, "").trim().to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn extract_output_variables<'a>(lines: &[&'a str]) -> Vec<String> {
-    let name_re = Regex::new(r#"name="([^"]+)"#).unwrap();
-    let var_re = Regex::new(r"\$\{([a-zA-Z0-9_]+)\}").unwrap();
-    lines
-        .iter()
-        .filter_map(|line| {
-            if line.contains("<camunda:outputParameter name=\"") && !line.contains("${true}") {
-                var_re
-                    .captures(line)
-                    .and_then(|caps| caps.get(1))
-                    .or_else(|| name_re.captures(line).and_then(|caps| caps.get(1)))
-                    .map(|m| m.as_str().trim().to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn remove_tags(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut in_tag = false;
-    for c in input.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
-        }
-    }
-    result
-}
-
-fn extract_variables_from_line(line: &str, variable_re: &Regex) -> Vec<String> {
-    let mut variables = Vec::new();
-    if let Some(capture) = variable_re.captures(line) {
-        if let Some(var) = capture.get(1) {
-            variables.push(var.as_str().to_string());
-        }
-    }
-    variables
-}
-
-fn extract_context_variables(lines: &[&str]) -> Vec<String> {
-    let variable_re = Regex::new(r#"['"](.*?)['"]"#).unwrap();
-    let mut variables = Vec::new();
+pub fn read_file(
+    path: &PathBuf,
+) -> Result<(Vec<String>, Vec<String>, Vec<(String, String)>), Box<dyn Error>> {
+    let mut uniq_user_task_attributes: HashSet<(String, String)> = HashSet::new();
+    let mut uniq_delegates: HashSet<String> = HashSet::new();
+    let mut uniq_context_variables: HashSet<String> = HashSet::new();
     let mut is_execution = false;
-    let execution_set_variable = "execution.setVariable(";
-    let execution_set_variables = "execution.setVariables(";
-    let execution_endings = [");", ")", "])", "]);"];
 
-    for line in lines {
-        let cleaned_line = line.trim();
-        if cleaned_line.is_empty() {
-            continue;
-        }
+    if let Ok(file) = File::open(path) {
+        let reader = BufReader::new(file);
 
-        let clean_line = remove_tags(cleaned_line);
+        for line_result in reader.lines() {
+            let line = line_result?;
+            let line = line.trim_start();
 
-        if clean_line.contains(execution_set_variable) {
-            variables.extend(extract_variables_from_line(&clean_line, &variable_re));
-        }
-
-        if !is_execution && clean_line.contains(execution_set_variables) {
-            is_execution = true;
-            variables.extend(extract_variables_from_line(&clean_line, &variable_re));
-        }
-
-        if is_execution {
-            if execution_endings
-                .iter()
-                .any(|&ending| clean_line.ends_with(ending))
+            if line.starts_with(&USER_TASK_PAT) {
+                if let Some((id, name)) = extract_id_and_name(&line) {
+                    uniq_user_task_attributes.insert((id.to_owned(), name.to_owned()));
+                }
+            } else if line.contains(&DELEGATE_PREF) {
+                if let Some(value) = extract_class_name(&line) {
+                    uniq_delegates.insert(value.to_owned());
+                }
+            } else if line.starts_with(INPUT_START_PAT)
+                && line.ends_with(INPUT_END_PAT)
+                && !line.contains(INPUT_EXC_PAT)
             {
-                is_execution = false;
-            } else {
-                variables.extend(extract_variables_from_line(&clean_line, &variable_re));
+                if let Some(value) = extract_input_variable(&line) {
+                    uniq_context_variables.insert(value.to_owned());
+                }
+            } else if line.starts_with(OUTPUT_PAT) && !line.contains(OUTPUT_EX_PAT) {
+                if line.contains(".") {
+                    if let Some(value) = extract_output_key(&line) {
+                        uniq_context_variables.insert(value.to_owned());
+                    }
+                } else {
+                    if let Some(value) = extract_output_value(&line) {
+                        uniq_context_variables.insert(value.to_owned());
+                    }
+                }
+            } else if line.contains(SET_VAR_PAT) && !line.starts_with("//") {
+                if let Some(value) = extract_set_variable(&line) {
+                    uniq_context_variables.insert(value.to_owned());
+                }
+            } else if (is_execution || line.contains(SET_VARS_PAT)) && !line.starts_with("//") {
+                let line_without_space: String =
+                    line.chars().filter(|c| !c.is_whitespace()).collect();
+                if line_without_space.contains(pat)
+                is_execution = true;
+                if let Some(value) = extract_set_variables(&line_without_space) {
+                    uniq_context_variables.insert(value.to_owned());
+                }
+                if line_without_space.contains(")]")
+                    || line_without_space.contains(")];")
+                    || line_without_space.contains(");")
+                    || line_without_space.starts_with(")")
+                {
+                    is_execution = false;
+                }
+            } else if line.starts_with(END_BPMN) {
+                break;
             }
         }
     }
-    variables
+    Ok((
+        uniq_delegates.into_iter().collect(),
+        uniq_context_variables.into_iter().collect(),
+        uniq_user_task_attributes.into_iter().collect(),
+    ))
+}
+
+fn extract_class_name(input: &str) -> Option<&str> {
+    let (_, class_value_part) = input.split_once(DELEGATE_PREF)?;
+    let (class_name, _) = class_value_part.split_once(END_QUOTE)?;
+    Some(class_name)
+}
+
+fn extract_id_and_name(input: &str) -> Option<(&str, &str)> {
+    let (_, id_part) = input.split_once(USER_TASK_PAT)?;
+    let (id, _) = id_part.split_once(END_QUOTE)?;
+
+    let (_, name_part) = input.split_once(NAME_PREF)?;
+    let (name, _) = name_part.split_once(END_QUOTE)?;
+
+    Some((id, name))
+}
+
+fn extract_input_variable(input: &str) -> Option<&str> {
+    let (_, start_part) = input.split_once(INPUT_START_PAT)?;
+    let (user_info, _) = start_part.split_once(INPUT_END_PAT)?;
+    Some(user_info)
+}
+
+fn extract_output_key(input: &str) -> Option<&str> {
+    let (_, start_part) = input.split_once(OUTPUT_PAT)?;
+    let (user_info, _) = start_part.split_once(END_QUOTE)?;
+    Some(user_info)
+}
+
+fn extract_output_value(input: &str) -> Option<&str> {
+    let start_marker = "${";
+    let end_marker = "}";
+    let (_, start_part) = input.split_once(start_marker)?;
+    let (user_info, _) = start_part.split_once(end_marker)?;
+    Some(user_info)
+}
+
+fn extract_set_variable(inp: &str) -> Option<&str> {
+    let (_, start) = inp.split_once(SET_VAR_PAT)?;
+    let end = if start.starts_with("'") { "'" } else { "\"" };
+    let (user_info, _) = start.split_once(end)?;
+    Some(user_info)
+}
+
+//TODO: Проверка
+// execution.setVariables(
+//     "owners": owners
+//     );
+
+//     def contractNumber = ((new Random()).nextInt(100) + 1) + ""
+//     def contractConclusionDate = new Date()
+//     def contractConclusionDateStr = contractConclusionDate.format("dd.MM.yyyy")
+
+//     execution.setVariables(
+//     "contractNumber": contractNumber,
+//     "contractConclusionDate": contractConclusionDate,
+//     "contractConclusionDateStr": contractConclusionDateStr
+//     );</bpmn:script>
+fn extract_set_variables(inp: &str) -> Option<&str> {
+    let marker = if inp.starts_with("'") { "'" } else { "\"" };
+    let (_, start_part) = inp.split_once(marker)?;
+    let (variable, _) = start_part.split_once(marker)?;
+    Some(variable)
 }

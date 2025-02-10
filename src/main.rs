@@ -2,26 +2,35 @@ mod excel;
 mod handler;
 mod util;
 
-use std::{env, fs};
+use std::time::Instant;
 
 use excel::Excel;
-use handler::{extract_unique_delegates, extract_user_task_attributes, get_combined_variables};
+use handler::read_file;
 use util::get_latest_bpmn_file;
 
 fn main() {
+    let start = Instant::now();
     dotenv::dotenv().ok();
-    let inp_dir = env::var("INPUT_DIR").expect("INPUT_DIR must be set");
+    let inp_dir = "./input";
     let file_path = get_latest_bpmn_file(&inp_dir)
         .expect(format!("In the directory {} is missing .bpmn files", inp_dir).as_str());
 
-    let orig_xml = fs::read_to_string(file_path).expect("Failed to read file");
+    let (uniq_delegates, uniq_context_variables, uniq_user_task_attributes) =
+        read_file(&file_path).expect("Failed to get value");
 
-    let uniq_delegates = extract_unique_delegates(orig_xml.lines());
-    let uniq_user_attributes = extract_user_task_attributes(orig_xml.lines());
-    let uniq_combined_variables = get_combined_variables(&orig_xml);
+    // println!("{:?}", uniq_delegates);
+    // println!("{:?}", uniq_delegates.len());
+    println!("=================================================");
+    println!("{:?}", uniq_context_variables);
+    println!("{:?}", uniq_context_variables.len());
+    println!("=================================================");
+    // println!("{:?}", uniq_user_task_attributes);
+    // println!("{:?}", uniq_user_task_attributes.len());
+    // let _ = Excel::new()
+    //     .write_to_excel_single(uniq_delegates, "Уникальные делегаты")
+    //     .write_to_excel_single(uniq_context_variables, "Контекстные переменные")
+    //     .write_to_excel(uniq_user_task_attributes, "Пользовательские задачи");
 
-    let _ = Excel::new()
-        .write_to_excel_single(uniq_delegates, "Уникальные делегаты")
-        .write_to_excel(uniq_user_attributes, "Пользовательские задачи")
-        .write_to_excel_single(uniq_combined_variables, "Контекстные переменные");
+    let duration = start.elapsed();
+    println!("Time elapsed in expensive_function() is: {:?}", duration);
 }
