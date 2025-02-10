@@ -6,19 +6,26 @@ use std::{
     path::PathBuf,
 };
 
-const DELEGATE_PREF: &str = "class=\"";
-const USER_TASK_PAT: &str = "<bpmn:userTask id=\"";
-const INPUT_START_PAT: &str = "<camunda:inputParameter name=\"outputName\">";
-const INPUT_END_PAT: &str = "</camunda:inputParameter>";
-const INPUT_EXC_PAT: &str = "${";
-const OUTPUT_PAT: &str = "<camunda:outputParameter name=\"";
-const OUTPUT_EX_PAT: &str = "${true}";
-const SET_VAR_PAT: &str = "execution.setVariable(";
-const SET_VARS_PAT: &str = "execution.setVariables(";
-
+const DELEGATE: &str = "class=\"";
+const USER_TASK: &str = "<bpmn:userTask id=\"";
+const INP_START: &str = "<camunda:inputParameter name=\"outputName\">";
+const INP_END: &str = "</camunda:inputParameter>";
+const START_SHIELD: &str = "${";
+const END_SHIELD: &str = "}";
+const OUT: &str = "<camunda:outputParameter name=\"";
+const OUT_EX: &str = "${true}";
+const OUT_VALUE: &str = ".";
+const SET_VAR_1: &str = "execution.setVariable(\"";
+const SET_VAR_2: &str = "execution.setVariable('";
+const SET_VARS: &str = "execution.setVariables(";
+const SET_VARS_1: &str = "execution.setVariables(\"";
+const SET_VARS_2: &str = "execution.setVariables('";
+const SET_VARS_END_1: &str = "])";
+const SET_VARS_END_2: &str = ")";
 const NAME_PREF: &str = "name=\"";
-const END_QUOTE: &str = "\"";
-
+const DOUBLE_QUOTE: &str = "\"";
+const ONE_QUOTE: &str = "'";
+const COMMENTS: &str = "//";
 const END_BPMN: &str = "<bpmndi:BPMNDiagram";
 
 pub fn read_file(
@@ -36,47 +43,59 @@ pub fn read_file(
             let line = line_result?;
             let line = line.trim_start();
 
-            if line.starts_with(&USER_TASK_PAT) {
+            if line.starts_with(USER_TASK) {
                 if let Some((id, name)) = extract_id_and_name(&line) {
                     uniq_user_task_attributes.insert((id.to_owned(), name.to_owned()));
                 }
-            } else if line.contains(&DELEGATE_PREF) {
-                if let Some(value) = extract_class_name(&line) {
+            } else if line.contains(DELEGATE) {
+                if let Some(value) = extract_var(line, DELEGATE, DOUBLE_QUOTE) {
                     uniq_delegates.insert(value.to_owned());
                 }
-            } else if line.starts_with(INPUT_START_PAT)
-                && line.ends_with(INPUT_END_PAT)
-                && !line.contains(INPUT_EXC_PAT)
+            } else if line.starts_with(INP_START)
+                && line.ends_with(INP_END)
+                && !line.contains(START_SHIELD)
             {
-                if let Some(value) = extract_input_variable(&line) {
+                if let Some(value) = extract_var(line, INP_START, INP_END) {
                     uniq_context_variables.insert(value.to_owned());
                 }
-            } else if line.starts_with(OUTPUT_PAT) && !line.contains(OUTPUT_EX_PAT) {
-                if line.contains(".") {
-                    if let Some(value) = extract_output_key(&line) {
+            } else if line.starts_with(OUT) && !line.contains(OUT_EX) {
+                if line.contains(OUT_VALUE) {
+                    if let Some(value) = extract_var(line, OUT, DOUBLE_QUOTE) {
                         uniq_context_variables.insert(value.to_owned());
                     }
                 } else {
-                    if let Some(value) = extract_output_value(&line) {
+                    if let Some(value) = extract_var(line, START_SHIELD, END_SHIELD) {
                         uniq_context_variables.insert(value.to_owned());
                     }
                 }
-            } else if line.contains(SET_VAR_PAT) && !line.starts_with("//") {
-                if let Some(value) = extract_set_variable(&line) {
+            } else if line.contains(SET_VAR_1) && !line.starts_with(COMMENTS) {
+                if let Some(value) = extract_var(line, SET_VAR_1, DOUBLE_QUOTE) {
                     uniq_context_variables.insert(value.to_owned());
                 }
-            } else if (is_execution || line.contains(SET_VARS_PAT)) && !line.starts_with("//") {
-                let line_without_space: String =
-                    line.chars().filter(|c| !c.is_whitespace()).collect();
-                if line_without_space.contains(pat)
-                is_execution = true;
-                if let Some(value) = extract_set_variables(&line_without_space) {
+            } else if line.contains(SET_VAR_2) && !line.starts_with(COMMENTS) {
+                if let Some(value) = extract_var(line, SET_VAR_2, ONE_QUOTE) {
                     uniq_context_variables.insert(value.to_owned());
                 }
-                if line_without_space.contains(")]")
-                    || line_without_space.contains(")];")
-                    || line_without_space.contains(");")
-                    || line_without_space.starts_with(")")
+            } else if line.contains(SET_VARS) {
+                if let Some(value) = extract_var(line, SET_VARS_1, DOUBLE_QUOTE) {
+                    uniq_context_variables.insert(value.to_owned());
+                }
+                if let Some(value) = extract_var(line, SET_VARS_2, ONE_QUOTE) {
+                    uniq_context_variables.insert(value.to_owned());
+                }
+                is_execution = !line.ends_with(SET_VARS_END_1);
+            } else if is_execution {
+                let marker = if line.starts_with(DOUBLE_QUOTE) {
+                    DOUBLE_QUOTE
+                } else {
+                    ONE_QUOTE
+                };
+                if let Some(value) = extract_var(line, marker, marker) {
+                    uniq_context_variables.insert(value.to_owned());
+                }
+                if line.starts_with(SET_VARS_END_1)
+                    || line.ends_with(SET_VARS_END_1)
+                    || line.starts_with(SET_VARS_END_2)
                 {
                     is_execution = false;
                 }
@@ -85,73 +104,32 @@ pub fn read_file(
             }
         }
     }
+    let mut sorted_delegates: Vec<String> = uniq_delegates.drain().collect();
+    sorted_delegates.sort();
+    let mut sorted_context_variables: Vec<String> = uniq_context_variables.drain().collect();
+    sorted_context_variables.sort();
+    let mut sorted_user_task_attributes: Vec<(String, String)> =
+        uniq_user_task_attributes.drain().collect();
+    sorted_user_task_attributes.sort_by(|a, b| a.1.cmp(&b.1));
     Ok((
-        uniq_delegates.into_iter().collect(),
-        uniq_context_variables.into_iter().collect(),
-        uniq_user_task_attributes.into_iter().collect(),
+        sorted_delegates,
+        sorted_context_variables,
+        sorted_user_task_attributes,
     ))
 }
 
-fn extract_class_name(input: &str) -> Option<&str> {
-    let (_, class_value_part) = input.split_once(DELEGATE_PREF)?;
-    let (class_name, _) = class_value_part.split_once(END_QUOTE)?;
-    Some(class_name)
-}
-
 fn extract_id_and_name(input: &str) -> Option<(&str, &str)> {
-    let (_, id_part) = input.split_once(USER_TASK_PAT)?;
-    let (id, _) = id_part.split_once(END_QUOTE)?;
+    let (_, id_part) = input.split_once(USER_TASK)?;
+    let (id, _) = id_part.split_once(DOUBLE_QUOTE)?;
 
     let (_, name_part) = input.split_once(NAME_PREF)?;
-    let (name, _) = name_part.split_once(END_QUOTE)?;
+    let (name, _) = name_part.split_once(DOUBLE_QUOTE)?;
 
     Some((id, name))
 }
 
-fn extract_input_variable(input: &str) -> Option<&str> {
-    let (_, start_part) = input.split_once(INPUT_START_PAT)?;
-    let (user_info, _) = start_part.split_once(INPUT_END_PAT)?;
-    Some(user_info)
-}
-
-fn extract_output_key(input: &str) -> Option<&str> {
-    let (_, start_part) = input.split_once(OUTPUT_PAT)?;
-    let (user_info, _) = start_part.split_once(END_QUOTE)?;
-    Some(user_info)
-}
-
-fn extract_output_value(input: &str) -> Option<&str> {
-    let start_marker = "${";
-    let end_marker = "}";
-    let (_, start_part) = input.split_once(start_marker)?;
-    let (user_info, _) = start_part.split_once(end_marker)?;
-    Some(user_info)
-}
-
-fn extract_set_variable(inp: &str) -> Option<&str> {
-    let (_, start) = inp.split_once(SET_VAR_PAT)?;
-    let end = if start.starts_with("'") { "'" } else { "\"" };
-    let (user_info, _) = start.split_once(end)?;
-    Some(user_info)
-}
-
-//TODO: Проверка
-// execution.setVariables(
-//     "owners": owners
-//     );
-
-//     def contractNumber = ((new Random()).nextInt(100) + 1) + ""
-//     def contractConclusionDate = new Date()
-//     def contractConclusionDateStr = contractConclusionDate.format("dd.MM.yyyy")
-
-//     execution.setVariables(
-//     "contractNumber": contractNumber,
-//     "contractConclusionDate": contractConclusionDate,
-//     "contractConclusionDateStr": contractConclusionDateStr
-//     );</bpmn:script>
-fn extract_set_variables(inp: &str) -> Option<&str> {
-    let marker = if inp.starts_with("'") { "'" } else { "\"" };
-    let (_, start_part) = inp.split_once(marker)?;
-    let (variable, _) = start_part.split_once(marker)?;
-    Some(variable)
+fn extract_var<'a>(inp: &'a str, start_pref: &'a str, end_pref: &'a str) -> Option<&'a str> {
+    let (_, start) = inp.split_once(start_pref)?;
+    let (res, _) = start.split_once(end_pref)?;
+    Some(res)
 }

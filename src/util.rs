@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf, time::UNIX_EPOCH};
 pub fn get_latest_bpmn_file(inp_dir: &str) -> Option<PathBuf> {
     fs::read_dir(inp_dir)
         .ok()?
-        .flatten() 
+        .flatten()
         .filter(|entry| {
             let path = entry.path();
             path.is_file() && path.extension().map_or(false, |ext| ext == "bpmn")
